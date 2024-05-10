@@ -1,0 +1,384 @@
+---
+title: "House Price Prediction -- Random Forest Model"
+author: "Tian"
+output: 
+    pdf_document
+---
+
+
+# Summary
+
+## Preprocessing
+
+### Transformation (if any)
+* price: performed box-cox transformation on the response variate price.
+* saledate: transformed as the number of days since 1970/01/01, then take the power of 5
+* landarea: take log
+* stories: take log
+* rmdl_diff: log(rmdl_diff + 1) because some of them are zero
+* all categorical variables is treated as factors
+* level of `cndtn` is specified
+* matched the level of `dtest` and `dtrain`
+
+### New Variables
+<!-- List all variables/predictors added to dtrain and dtest  -->
+* if_rmdl : indicator whether the house is remodeled
+* rmdl_diff: numerical rep the difference between remodel date and sale date;
+0 if remodel is after sale
+* saleyear: year of the sale
+* buy_first: indicator whether the house is build first or buy first
+* total_bath: combine number of bathroom and number of half-bathrooms (bathrm+0.5hf_bathrm)
+* build_age: the years between sold year and year of build
+* avg_room_size: divide `gba` by (the number of rooms + 1) to get the average size of rooms
+* inter1: interaction term between latitude and saledate
+* inter2: interaction term between longitude and saledate
+* inter3: interaction term between gba and saledate
+* inter4: interaction term between landarea and longitude
+* inter5: interaction term between eyb and ayb
+* inter6: interaction term between build_age and latitude
+
+
+## Model Building/Tuning
+
+Main package used: `randomforest`, `ranger`, `caret`
+
+Parameters tuned and their optimal values:
+
+* mtry: 37
+* min.node.size: 5
+* splitrule: extratrees
+
+final model: ranger($\frac{(price^{0.101}-1)}{0.101} \sim$ ~ .,
+                data = dtrain_full,
+                mtry = 37, splitrule = "extratrees",
+                min.node.size = 5)
+
+
+
+
+# 1.Preprocessing
+
+## 1.1 Loading data
+```{r,echo=TRUE}
+load("RF.Rdata")
+```
+
+## 1.2 missing values
+
+Check missing values for each predictor:
+```{r,echo=TRUE}
+colSums(is.na(dtrain))
+```
+
+```{r,echo=TRUE}
+colSums(is.na(dtest))
+```
+
+So far we don't deal with missing values in `yr_rmdl`, we will add two new variables later to explain it so `yr_rmdl` won't be used directly in the model.
+
+```{r}
+# =========== train ===============
+avg_gap_train <- mean(dtrain$eyb-dtrain$ayb, na.rm = T)
+# missing ayb is recoded as eyb - avg_gap between ayb and eyb
+dtrain$ayb <- ifelse(is.na(dtrain$ayb), dtrain$eyb-avg_gap_train, dtrain$ayb)
+# missing quadrant is recoded as "NW" bc "NW" is most popular
+dtrain$quadrant <- ifelse(is.na(dtrain$quadrant), "NW", dtrain$quadrant)
+
+
+#=========== test ============
+avg_gap_test <- mean(dtest$eyb-dtest$ayb, na.rm = T)
+# missing ayb is recoded as eyb - avg_gap between ayb and eyb
+dtest$ayb <- ifelse(is.na(dtest$ayb), dtest$eyb-avg_gap_test, dtest$ayb)
+# missing quadrant is recoded as "NW" bc "NW" is most popular
+dtest$quadrant <- ifelse(is.na(dtest$quadrant), "NW", dtest$quadrant)
+```
+
+
+```{r}
+colSums(is.na(dtrain))
+colSums(is.na(dtest))
+```
+
+
+```{r, eval=F, echo=FALSE}
+dtrain[!complete.cases(dtrain), ]
+```
+
+```{r, eval=F, echo=FALSE}
+dtest[!complete.cases(dtest), ]
+```
+
+
+## 1.3 new variable
+```{r}
+# binary variable check whether the house is remodeled
+dtrain$if_rmdl <- ifelse(is.na(dtrain$yr_rmdl), 0, 1)
+dtrain$if_rmdl <- as.factor(dtrain$if_rmdl)
+
+dtest$if_rmdl <- ifelse(is.na(dtest$yr_rmdl), 0, 1)
+dtest$if_rmdl <- as.factor(dtest$if_rmdl)
+
+
+# year of the house sold
+dtrain$saleyear<-as.numeric(substr(dtrain$saledate, 1, 4))
+dtest$saleyear<-as.numeric(substr(dtest$saledate, 1, 4))
+
+
+# the difference between sale year and the remodel year, if remodel is after sale
+# then 0
+for (i in seq(nrow(dtrain))) {
+  if (is.na(dtrain$yr_rmdl[i])) {
+    dtrain$rmdl_diff[i] <- 0
+  } else if (dtrain$saleyear[i] <= dtrain$yr_rmdl[i]) {
+    dtrain$rmdl_diff[i] <- 0
+  } else if (dtrain$saleyear[i] > dtrain$yr_rmdl[i])
+    dtrain$rmdl_diff[i] <- dtrain$saleyear[i] - dtrain$yr_rmdl[i]
+}
+
+for (i in seq(nrow(dtest))) {
+    if (is.na(dtest$yr_rmdl[i])) {
+      dtest$rmdl_diff[i] <- 0
+    } else if (dtest$saleyear[i] <= dtest$yr_rmdl[i]) {
+      dtest$rmdl_diff[i] <- 0
+    } else if (dtest$saleyear[i] > dtest$yr_rmdl[i])
+      dtest$rmdl_diff[i] <- dtest$saleyear[i] - dtest$yr_rmdl[i]
+}
+
+# average room size
+dtrain$avg_room_size <- dtrain$gba / (dtrain$rooms +1)
+dtest$avg_room_size <- dtest$gba / (dtest$rooms +1)
+
+# year since build
+dtrain$build_age <- as.numeric(substr(dtrain$saledate, 1,4)) - dtrain$ayb
+dtest$build_age <- as.numeric(substr(dtest$saledate, 1,4)) - dtest$ayb
+
+
+# combine bathroom and half_bathroom
+dtrain$total_bath <- dtrain$bathrm+0.5*dtrain$hf_bathrm
+dtest$total_bath <- dtest$bathrm+0.5*dtest$hf_bathrm
+
+# whether it's sold first or build first
+dtrain$buy_first <- as.factor(as.numeric(dtrain$saleyear < dtrain$ayb))
+dtest$buy_first <- as.factor(as.numeric(dtest$saleyear < dtest$ayb))
+```
+
+
+
+```{r}
+# fill the na for yr_rmdl as 0
+dtrain$yr_rmdl <- ifelse(is.na(dtrain$yr_rmdl), 0, dtrain$yr_rmdl)
+dtest$yr_rmdl <- ifelse(is.na(dtest$yr_rmdl), 0, dtest$yr_rmdl)
+# remove haft bathrooom
+dtrain <- dtrain[, -which(names(dtrain) == "hf_bathrm")]
+dtest <- dtest[, -which(names(dtest) == "hf_bathrm")]
+# remove yr_rmdl
+dtrain <- dtrain[, -which(names(dtrain) == "yr_rmdl")]
+dtest <- dtest[, -which(names(dtest) == "yr_rmdl")]
+```
+
+
+
+```{r}
+dtrain_full <- na.omit(dtrain)
+colSums(is.na(dtrain_full))
+colSums(is.na(dtest))
+```
+
+Now, `dtrain_full` is the complete data frame we will be working with.
+
+
+## 1.3 data transformation
+```{r}
+# the number of days since 1970/01/01
+dtrain_full$saledate <- as.numeric(as.Date(dtrain_full$saledate))
+dtest$saledate <- as.numeric(as.Date(dtest$saledate))
+
+
+dtrain_full[] <- lapply(dtrain_full, function(x) if(is.character(x)) factor(x) else x)
+dtest[] <- lapply(dtest, function(x) if(is.character(x)) factor(x) else x)
+```
+
+
+```{r}
+condition_levels <- c("Poor", "Fair", "Average", "Good", "Very Good", "Excellent")
+dtrain_full$cndtn <- factor(dtrain_full$cndtn, levels = condition_levels)
+dtest$cndtn <- factor(dtest$cndtn, levels = condition_levels)
+```
+
+
+```{r}
+dtrain_full$gba <- log(dtrain_full$gba)
+dtrain_full$landarea <- log(dtrain_full$landarea)
+dtrain_full$saledate <- dtrain_full$saledate^5
+dtrain_full$stories <- log(dtrain_full$stories)
+dtrain_full$rmdl_diff <- log(dtrain_full$rmdl_diff + 1)
+dtrain_full$price <- (dtrain_full$price^0.101-1)/0.101
+```
+
+
+```{r}
+# match the level of dtrain and dtest
+for (var in names(dtrain_full)) {
+    if (is.factor(dtrain_full[[var]]) && is.factor(dtest[[var]])) {
+      updated_levels <- setdiff(levels(dtest[[var]]), levels(dtrain_full[[var]]))
+      if (length(updated_levels) > 0) {
+        common <- names(sort(table(dtrain_full[[var]]), decreasing = TRUE))[1]
+        levels(dtest[[var]]) <- union(levels(dtrain_full[[var]]), levels(dtest[[var]]))
+        dtest[[var]][dtest[[var]] %in% updated_levels] <- common
+        dtest[[var]] <- factor(dtest[[var]], levels = levels(dtrain_full[[var]]))
+      }
+    }
+  }
+```
+
+
+```{r}
+# add interaction terms
+dtrain_full$inter1 <- with(dtrain_full, latitude * saledate)
+dtrain_full$inter2 <- with(dtrain_full, longitude * saledate)
+dtrain_full$inter3 <- with(dtrain_full, gba * saledate)
+dtrain_full$inter4 <- with(dtrain_full, landarea * longitude)
+dtrain_full$inter5 <- with(dtrain_full, eyb * ayb)
+dtrain_full$inter6 <- with(dtrain_full, build_age * latitude)
+
+dtest$inter1 <- with(dtest, latitude * saledate)
+dtest$inter2 <- with(dtest, longitude * saledate)
+dtest$inter3 <- with(dtest, gba * saledate)
+dtest$inter4 <- with(dtest, landarea * longitude)
+dtest$inter5 <- with(dtest, eyb * ayb)
+dtest$inter6 <- with(dtest, build_age * latitude)
+```
+
+
+# 2. Model building
+
+```{r}
+library(caret)
+library(ranger)
+library(randomForest)
+```
+
+
+Split test and training data
+```{r}
+N <- nrow(dtrain_full)
+N_train <- round(2* N /3)
+N_test <- N - N_train
+id.train <- sample(1:N, N_train, replace=FALSE)
+id.test <- setdiff(1:N, id.train)
+test <- dtrain_full[id.test,]
+```
+
+```{r}
+get.newdata <- function(fittedTree, test.data){
+  f <- formula(fittedTree)
+  as.list(test.data[,attr(terms(f), "term.labels")])
+}
+#
+# And a similar function that will extract the response values
+# This is kind of hairy, formula manipulation ... feel free to ignore ... 
+get.response <- function(fittedTree, test.data){
+  f <- formula(fittedTree)
+  terms <- terms(f)
+  response.id <- attr(terms, "response")
+  response <- as.list(attr(terms, "variables"))[[response.id + 1]]
+  with(test.data,eval(response))
+}
+
+get.explanatory_varnames <- function(formula){ 
+  f <- as.formula(formula)
+  terms <- terms(f)
+  attr(terms, "term.labels")
+}
+```
+
+
+## 2.1 The naive model
+
+```{r}
+set.seed(444)
+naive <- randomForest(price ~ ., data=dtrain_full,
+                      importance=TRUE)
+```
+
+We plot the importance measured by mean decrease in accuracy 
+ 
+```{r}
+importance <- importance(naive, type = 1) 
+importance_sort <- sort(importance, decreasing = TRUE)
+indices <- order(-importance)
+names <- row.names(importance)[indices]
+barplot(importance_sort, names.arg = names, las = 2, 
+        main = "Variable Importance",
+        ylab = "Importance", cex.names = 0.7)
+avg <- mean(importance)
+abline(h = avg, col = "red")
+```
+
+Remove the last two predictors
+```{r}
+select_var <- names[1:35]
+select_var
+```
+
+Run cross-validation on the naive model
+```{r}
+trainy <- dtrain_full[,"price"]
+trainx <- dtrain_full[, get.explanatory_varnames(naive)]
+cv_naive <- rfcv(trainx = trainx, trainy = trainy, cv.fold = 5)
+```
+
+```{r}
+with(cv_naive, plot(n.var, error.cv, pch = 19, type="b", col="blue"))
+```
+We see the error stops decreasing after the the number of predictors hits 17. Since more predictors don't increase error, we use all the predictors in the model.
+
+
+
+```{r, eval=FALSE, echo=FALSE}
+set.seed(444)
+naive_trian <- randomForest(price ~ ., data=dtrain_full,subset = id.train,
+                      importance=TRUE)
+pred <- predict(naive_trian, test)
+
+actual <- test$price
+# estimated APSE 
+mean((actual-pred)^2)
+```
+
+```{r, eval=FALSE, echo=FALSE}
+# estimated APSE
+set.seed(444)
+naive_subset <- randomForest(price ~ saledate + gba + saleyear + landarea + buy_first+nbhd + eyb
+               + cndtn + total_bath + latitude + yr_rmdl + longitude+ grade + ayb + build_age
+               + nbhd + quadrant + ward 
+               , data=dtrain_full, subset = id.train)
+pred <- predict(naive_subset, test)
+
+actual <- test$price
+# estimated APSE 
+mean((actual-pred)^2)
+```
+
+
+## 2.2 tuning 
+
+```{r}
+set.seed(444)
+train_control <- trainControl(method="cv", number=5)
+tuneGrid <- expand.grid(.mtry=c(8, 9, 10, 14, 20, 30, 37),
+                        .min.node.size = c(5, 6, 7, 9, 10),
+                        .splitrule = c("variance", "extratrees"))
+
+tr1 = train(
+  x = dtrain_full[ , names(dtrain_full) != 'price'],
+  y = dtrain_full[ , names(dtrain_full) == 'price'],
+  method = 'ranger', trControl = train_control, tuneGrid = tuneGrid
+)
+
+tr1
+```
+
+
+
+
