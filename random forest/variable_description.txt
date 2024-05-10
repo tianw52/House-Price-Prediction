@@ -1,0 +1,27 @@
+price: response
+bathrm: number of bathrooms
+hf_bathrm: number of half bathrooms
+heat: heating
+ac: air conditioning
+rooms: number of rooms
+bedrm: number of bedrooms
+ayb: The earliest time the main portion of the building was built
+yr_rmdl: Year structure was remodelled
+eyb: The year an improvement was built 
+stories: number of stories in primary dwelling
+saledate: Date of sale
+gba: Gross building area in square feet
+style: the style of the house
+grade: evaluation result of the house
+cndtn: Condition
+extwall: Exterior wall material
+roof: Roof type
+intwall: Interior wall material
+kitchens: number of kitchens
+fireplaces: number of fireplaces
+landarea: Land area of property in square feet
+latitude: latitude of the house
+longitude: longitude of the house
+nbhd: Neighborhood ID
+ward: Ward ID
+quadrant: which quadrant the house is located
