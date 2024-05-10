@@ -2,11 +2,15 @@
 * Predicting house price using random forest model and smoothing spline model.
 * Both models are built using `dtrain` and tested using `dtest`
 
-# Claims
-* The only language used is `R`
-* The same pre-processing is applied for both models since the datasets have the same variables (differ in observation).
-* However, some new variables are only used in random forest (interation 1-6) but not in smoothing spline. Specific pre-processing can be found in the markdown/pdf in corresponding folders.
+# Results:
+The comparison of the two models is outlined in this document. Detailed pre-processing and model-building processes can be found in the corresponding folders.
+## Smoothing Spline
 
+## Random Forest
+
+# Note:
+* `R` is the primary language
+* The same pre-processing is applied for both models since the datasets have the same variables (differ in observation).However, some new variables are only used in random forest (interation 1-6) but not in smoothing spline. Specific pre-processing can be found in the markdown/pdf in corresponding folders.
 
 
 # Data Description
