@@ -1,1 +1,4 @@
-
+Build a Random Forests model with the data in dtrain, and make predictions on the data in dtest. 
+Both dtrain and dtest can be loaded into R by command ”load(‘RF.Rdata’)”. 
+The description of the variables can be found in "variable_description.txt". 
+The prediction error is evaluated by RMLSE (Root- Mean-Squared-Logarithmic-Error), which is the square root of the mean squared error on the natural log scale.
