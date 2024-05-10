@@ -20,7 +20,7 @@ fit.sm <- mgcv::gam(price ~ s(rooms)
              ,data = dat_full)
 ```
 
-* Increase the prediction accuracy by comparing to the baseline model
+* Increase the prediction accuracy by **50%** comparing to the basic linear model
 
 ## Random Forest
 ### Final Model
@@ -31,7 +31,7 @@ fit.rf <- ranger::ranger(price ~ . - fold,
                 min.node.size = 5)
 ```
 
-* Increase the prediction accuracy by comparing to the baseline model
+* Increase the prediction accuracy by **22%** comparing to the basic linear model
 
 
 # Note:
