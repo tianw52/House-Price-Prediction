@@ -5,12 +5,40 @@
 # Results:
 The comparison of the two models is outlined in this document. Detailed pre-processing and model-building processes can be found in the corresponding folders.
 ## Smoothing Spline
+### Final Model
+```
+fit.sm <- mgcv::gam(price ~ s(rooms)
+             +s(total_bath)+s(rmdl_diff)
+             +s(bedrm)+s(ayb, k = 20, by = cndtn)+s(eyb)+s(saledate)+s(gba)
+             +fireplaces
+             +s(landarea)+s(latitude)+s(longitude)
+             + heat+ac+style+grade+cndtn+roof+kitchens+ward
+             +if_rmdl+buy_first
+             + ti(eyb, ayb) + ti(gba,landarea)+ti(longitude,gba)
+             + ti(longitude, ayb)
+             +ti(longitude, eyb)+ti(saledate,latitude)
+             ,data = dat_full)
+```
+
+* Increase the prediction accuracy by comparing to the baseline model
 
 ## Random Forest
+### Final Model
+```
+fit.rf <- ranger::ranger(price ~ . - fold,
+                data = dat_full,
+                mtry = 37, splitrule = "extratrees",
+                min.node.size = 5)
+```
+
+* Increase the prediction accuracy by comparing to the baseline model
+
 
 # Note:
 * `R` is the primary language
-* The same pre-processing is applied for both models since the datasets have the same variables (differ in observation).However, some new variables are only used in random forest (interation 1-6) but not in smoothing spline. Specific pre-processing can be found in the markdown/pdf in corresponding folders.
+* The prediction error is evaluated by **RMLSE** (Root- Mean-Squared-Logarithmic-Error)
+* The same pre-processing is applied for both models since the datasets have the same variables (differ in observation). However, some new variables are only used in random forest (interation 1-6) but not in smoothing spline. Specific pre-processing can be found in the markdown/pdf in corresponding folders.
+* **5-fold cross-validation** is used for model comparison
 
 
 # Data Description
@@ -185,6 +213,16 @@ It can be seen that some variables has obvious different impact on prices based 
 * `ward`: houses located in ward 2 and 3 have higher prices while house located in ward 7 and 8 have the lowest prices.
 * `quadrant`: houses located in northwest tend to have higher prices.
 
+# Comparison Summary
+Detailed comparsion can be found in `final report`
+
+<img width="1034" alt="Screenshot 2024-05-10 at 18 37 48" src="https://github.com/tianw52/House-Price-Prediction/assets/129543727/4aeeb41a-edf3-4983-b545-a3df56e37443">
+
+* **Prediction accuracy:** smoothing spline is better
+* **Computational complexity and runtime**: random forest is better
+* **Ease of use/model building**: random forest is easier to build as there are fewer fine-tuning parameters
+* **Interpretation**: smoothing spline is more interpretable than random forest
+* **Sensitivity to outliers**: random forest is more robust to outliers than smoothing spline
 
 
-
+ 
