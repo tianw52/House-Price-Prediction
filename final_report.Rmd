@@ -1,0 +1,819 @@
+---
+title: "Final Report"
+author: "Tian"
+output: 
+    pdf_document:
+      toc: true
+      latex_engine: xelatex
+      number_sections: yes
+---
+
+\newpage
+
+# Data description
+
+```{r,include=FALSE}
+load("Final.Rdata")
+dat_ori <- dat
+```
+
+```{r,include=FALSE}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(mgcv)
+library(ranger)
+library(randomForest)
+library(knitr)
+library(caret)
+library(gridExtra)
+library(patchwork)
+library(kableExtra)
+```
+
+```{r, echo=FALSE}
+dat$fold <- fold
+
+# =========== train ===============
+avg_gap_train <- mean(dat$eyb-dat$ayb, na.rm = T)
+# missing ayb is recoded as eyb - avg_gap between ayb and eyb
+dat$ayb <- ifelse(is.na(dat$ayb), dat$eyb-avg_gap_train, dat$ayb)
+# missing quadrant is recoded as "NW" bc "NW" is most popular
+dat$quadrant <- ifelse(is.na(dat$quadrant), "NW", dat$quadrant)
+
+# binary variable check whether the house is remodeled
+dat$if_rmdl <- ifelse(is.na(dat$yr_rmdl), 0, 1)
+dat$if_rmdl <- as.factor(dat$if_rmdl)
+
+# year of the house sold
+dat$saleyear<-as.numeric(substr(dat$saledate, 1, 4))
+
+# the difference between sale year and the remodel year, if remodel is after sale
+# then 0
+for (i in seq(nrow(dat))) {
+  if (is.na(dat$yr_rmdl[i])) {
+    dat$rmdl_diff[i] <- 0
+  } else if (dat$saleyear[i] <= dat$yr_rmdl[i]) {
+    dat$rmdl_diff[i] <- 0
+  } else if (dat$saleyear[i] > dat$yr_rmdl[i])
+    dat$rmdl_diff[i] <- dat$saleyear[i] - dat$yr_rmdl[i]
+}
+
+# average room size
+dat$avg_room_size <- dat$gba / (dat$rooms +1)
+
+# year since build
+dat$build_age <- as.numeric(substr(dat$saledate, 1,4)) - dat$ayb
+
+
+# combine bathroom and half_bathroom
+dat$total_bath <- dat$bathrm+0.5*dat$hf_bathrm
+
+# whether it's sold first or build first
+dat$buy_first <- as.factor(as.numeric(dat$saleyear < dat$ayb))
+
+
+
+# manage level mismatching
+tbl_heat <- table(dat$heat)
+dat$heat[dat$heat %in% names(tbl_heat[tbl_heat<10])] <- "Other"
+tbl_style <- table(dat$style)
+dat$style[dat$style %in% names(tbl_style[tbl_style<10])] <- "Other"
+tbl_grade <- table(dat$grade)
+dat$grade[dat$grade %in% names(tbl_grade[tbl_grade<20])] <- "Other"
+tbl_cndtn <- table(dat$cndtn)
+dat$cndtn[dat$cndtn %in% names(tbl_cndtn[tbl_cndtn<30])] <- "Poor/Fair"
+dat$roof[dat$roof == "Typical"] <- "Comp Shingle"
+tbl_roof <- table(dat$roof)
+dat$roof[dat$roof %in% names(tbl_roof[tbl_roof<10])] <- "Other"
+dat$intwall[dat$intwall == "Default"] <- "Hardwood"
+tbl_intwall <- table(dat$intwall)
+dat$intwall[dat$intwall %in% names(tbl_intwall[tbl_intwall<10])] <- "Other"
+tbl_ward <- table(dat$ward)
+dat$ward[dat$ward %in% names(tbl_ward[tbl_ward<10])] <- "Other"
+
+
+# fill the na for yr_rmdl as 0
+dat$yr_rmdl <- ifelse(is.na(dat$yr_rmdl), 0, dat$yr_rmdl)
+# remove haft bathrooom
+dat <- dat[, -which(names(dat) == "hf_bathrm")]
+# remove yr_rmdl
+dat <- dat[, -which(names(dat) == "yr_rmdl")]
+```
+
+```{r, echo=FALSE}
+# omit other na
+dat_full <- na.omit(dat)
+
+
+# the number of days since 1970/01/01
+dat_full$saledate <- as.numeric(as.Date(dat_full$saledate))
+
+# to factor
+dat_full[] <- lapply(dat_full, function(x) if(is.character(x)) factor(x) else x)
+
+condition_levels <- c("Poor/Fair", "Average", "Good", "Very Good", "Excellent")
+dat_full$cndtn <- factor(dat_full$cndtn, levels = condition_levels)
+
+
+dat_full$gba <- log(dat_full$gba)
+dat_full$landarea <- log(dat_full$landarea)
+dat_full$saledate <- dat_full$saledate^5
+dat_full$stories <- log(dat_full$stories)
+dat_full$rmdl_diff <- log(dat_full$rmdl_diff + 1)
+dat_full$price <- (dat_full$price^0.101-1)/0.101
+
+
+dat_full$inter1 <- with(dat_full, latitude * saledate)
+dat_full$inter2 <- with(dat_full, longitude * saledate)
+dat_full$inter3 <- with(dat_full, gba * saledate)
+dat_full$inter4 <- with(dat_full, landarea * longitude)
+dat_full$inter5 <- with(dat_full, eyb * ayb)
+dat_full$inter6 <- with(dat_full, build_age * latitude)
+
+fold <- dat_full$fold
+```
+
+After pre-processing, the data frame we are working with consist of 38 meaningful variables (note `fold` is included in the data frame for convenience, we don't use it in any modeling) and 5995 observations.
+
+-   13 factors:
+    -   heat: type of heat used in the house
+    -   ac: whether the house has air conditioning or not
+    -   style: describes the number of stories and/or structure of the house
+    -   grade: overall rating of the house
+    -   cndtn: condition of the house
+    -   extwall: material used for exterior wall
+    -   roof: type of roof
+    -   intwall: material used for interior wall
+    -   nbhd: ID of the neighborhood the house belongs to
+    -   ward: ID of the ward the house belongs to
+    -   quadrant: quadrant the house belongs to
+    -   if_rmdl: whether the house has been re-modeled ever
+    -   buy_first: indicator variable that has value of 1 if the house was bought before build
+-   6 integers:
+    -   rooms: total number of rooms
+    -   bathrm: number of full bathrooms (shower + toilet)
+    -   bedrm: number of bedrooms
+    -   eyb: the year an improvement was built
+    -   kitchens: number of kitchens
+    -   fireplaces: number of fireplaces
+-   19 numerical:
+    -   ayb: the earliest time the main portion of the building was built
+    -   stories: number of stories in primary dwelling
+    -   saledate: date of sale as numerical values
+    -   **price (response)**: price of the house
+    -   gba: gross building area in square feet
+    -   landarea: land area of property in square feet
+    -   latitude: latitude of the house
+    -   longitude: longitude of the house
+    -   saleyear: year the house sold
+    -   rmdl_diff: difference between the sale year and the re-model year, if re-model is done after sale, then the value is 0
+    -   avg_room_size: average size of the room in sqre feet
+    -   build_age: how long the house has been built
+    -   total_bath: total number of full bathrooms and half bathrooms
+    -   inter1: interaction between latitude and saledate (used in random forest only)
+    -   inter2: interaction between longitude and saledate (used in random forest only)
+    -   inter3: interaction between gba and saledate (used in random forest only)
+    -   inter4: interaction between landarea and longitude (used in random forest only)
+    -   inter5: interaction between eyb and ayb (used in random forest only)
+    -   inter6: interaction between latitude and build_age (used in random forest only)
+
+## Variable Types
+
+```{r}
+df_tmp <- subset(dat_full, select = -fold)
+types <- sapply(df_tmp, class)
+type_counts <- table(types)
+type_table <- as.data.frame(type_counts)
+colnames(type_table) <- c("Variable Type", "Count")
+
+kable_output <- kable(type_table, format = "simple",
+                      caption = "Summary of Variable Types (after pre-processing)")
+print(kable_output)
+```
+
+## numerical variables
+
+```{r}
+excluded_vars <- c("inter1", "inter2", "inter3", "inter4",
+                   "inter5", "inter6", "fold")
+
+plot_histograms <- function(df, exclude_vars = NULL,
+                            bin_count = 30) {
+  if (!is.null(exclude_vars)) {
+    df <- select(df, -all_of(exclude_vars))
+  }
+  numeric_df <- df[sapply(df, is.numeric)]
+
+  long_df <- pivot_longer(numeric_df, cols = everything(),
+                          names_to = "Column", values_to = "Value")
+
+  p <- ggplot(long_df, aes(x = Value)) +
+    geom_histogram(bins = bin_count, fill = "orange", color = "black") +
+    facet_wrap(~ Column, scales = "free") +
+    theme_minimal() +
+    theme(plot.title = element_text(size = 10, face = "bold"),
+          axis.text = element_text(size = 6),
+          axis.title = element_text(size = 6)) +
+    labs(title = "Histograms for Numeric variables", x = "Value", y = "Count")
+
+  return(p)
+}
+
+plot_histograms(dat_full, exclude_vars = excluded_vars)
+```
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE, eval=FALSE}
+plot_numeric_scatterplots <- function(data, target_var, exclude_vars) {
+  numeric_vars <- sapply(data, is.numeric)
+  numeric_vars[exclude_vars] <- FALSE
+
+  for (var in names(numeric_vars)[numeric_vars]) {
+    if (var != target_var) {  
+      p <- ggplot(data, aes_string(x = var, y = target_var)) +
+        geom_point(alpha = 0.5, col = "steelblue") +  
+        geom_smooth(method = "lm", color = "orange") +
+        labs(title = paste("Scatter Plot of", target_var, "vs", var),
+             x = var,
+             y = target_var)
+      print(p)
+    }
+  }
+}
+
+plot_numeric_scatterplots(dat_full, "price", excluded_vars) 
+```
+
+```{r, warning=FALSE, message=FALSE}
+plot_numeric <- function(data, target_var, exclude_vars) {
+  numeric_vars <- sapply(data, is.numeric)
+  numeric_vars[exclude_vars] <- FALSE
+  plots <- list()  
+  for (var in names(numeric_vars)[numeric_vars]) {
+    if (var != target_var) {  
+      p <- ggplot(data, aes_string(x = var, y = target_var)) +
+        geom_point(alpha = 0.5, col = "steelblue") +  
+        geom_smooth(method = "lm", color = "orange") +
+        labs(title = paste( target_var, "vs", var),
+             x = var,
+             y = target_var) +
+        theme(plot.title = element_text(size = 10),
+              axis.text = element_text(size = 6),
+              axis.title = element_text(size = 6))
+
+      plots[[var]] <- p  
+    }
+  }
+
+  plot_layout <- Reduce(`+`, plots) + 
+                 plot_layout(guides = 'collect')
+  print(plot_layout)
+}
+
+excluded_vars <- c("inter1", "inter2", "inter3", "inter4", "inter5", "inter6", "fold")
+plot_numeric(dat_full, "price", excluded_vars)
+```
+
+All the numerical variables other than `longtitude` has a positive relationship with `price`.
+
+## geographic
+
+```{r}
+ggplot(dat_ori, aes(x = longitude, y = latitude, color = price, size = price)) +
+  geom_point(alpha = 0.5, shape = 15) + 
+  scale_color_gradient(low = "lightblue", high = "firebrick") +  
+  ggtitle("Geospatial Distribution of Price") +
+  xlab("Longitude") +
+  ylab("Latitude") +
+  theme_minimal() 
+```
+
+Using latitude and longitude values, we see area around longitude = -74.2 and latitude = 40.725 has higher price, which indicates location is an importance factor in house price.
+
+## categorical variables
+
+```{r}
+plot_cate <- function(data, target_var) {
+  factor_vars <- sapply(data, is.factor)
+  plots <- list()
+  
+  for (var in names(factor_vars)[factor_vars]) {
+      p <- ggplot(data, aes_string(x = var, y = target_var)) +
+          geom_jitter(width = 0.2, alpha = 0.5, color = "darkblue") +
+          labs(title = paste(target_var, "vs", var),
+               x = var, y = target_var) +
+          theme(plot.title = element_text(size = 10),
+                axis.text = element_text(size = 6),
+                axis.title = element_text(size = 6),
+                axis.text.x = element_text(angle = 45, hjust = 1))
+      plots[[var]] <- p
+  }
+  
+  group1 <- plots[1:min(7, length(plots))]  
+  group2 <- if (length(plots) > 5) plots[6:length(plots)] else NULL 
+
+  if (!is.null(group1)) {
+    plot_group1 <- wrap_plots(group1)
+    print(plot_group1)
+  }
+  if (!is.null(group2)) {
+    plot_group2 <- wrap_plots(group2)
+    print(plot_group2)
+  }
+}
+
+plot_cate(data = dat_full, target_var = "price")
+```
+
+It can be seen that some variables has obvious different impact on prices based on their levels. Such variables are 
+
+- `cndtn`: the better the condition, the higher the price.
+- `grade`: the better the rating, the higher the price.
+- `ward`: houses located in ward 2 and 3 have higher prices while house located in ward 7 and 8 have the lowest prices.
+- `quadrant`: houses located in north west are tend to have higher prices.
+
+\newpage
+
+# Statistical analysis
+
+## The Models for Each Method
+
+### Smoothing
+
+The final model is:
+
+```{r, sm-model, cache=TRUE}
+begin_sm <- Sys.time()
+fit.sm <- mgcv::gam(price ~ s(rooms)
+             +s(total_bath)+s(rmdl_diff)
+             +s(bedrm)+s(ayb, k = 20, by = cndtn)+s(eyb)+s(saledate)+s(gba)
+             +fireplaces
+             +s(landarea)+s(latitude)+s(longitude)
+             + heat+ac+style+grade+cndtn+roof+kitchens+ward
+             +if_rmdl+buy_first
+             + ti(eyb, ayb) + ti(gba,landarea)+ti(longitude,gba)
+             + ti(longitude, ayb)
+             +ti(longitude, eyb)+ti(saledate,latitude)
+             ,data = dat_full)
+end_sm <- Sys.time()
+```
+
+### Random Forest
+
+The final model is:
+
+```{r, rf-model, cache=TRUE}
+begin_rf <- Sys.time()
+fit.rf <- ranger::ranger(price ~ . - fold,
+                data = dat_full,
+                mtry = 37, splitrule = "extratrees",
+                min.node.size = 5)
+end_rf <- Sys.time()
+```
+
+## Comparison Summary
+
+```{r}
+compare_df <- data.frame(
+  model = c("smoothing spline", "random forest"),
+  running_time = c(end_sm - begin_sm, end_rf - begin_rf),
+  training_time = c("10 hrs", "5 hrs"),
+  prediction_error = c(0.1908, 0.1959)
+)
+
+kable(compare_df, format = "latex", booktabs = TRUE, align = "c",
+      caption = "Comparison Summary") %>% 
+  kable_styling(latex_options = c("striped", "scale_down")) %>%
+  column_spec(1, bold = TRUE, color = "black") %>%
+  row_spec(0, bold = TRUE, background = "#D3D3D3")
+```
+
+## Predictive accuracy
+
+The cross-validation function for smoothing and random forest:
+
+```{r}
+cv_sm <- function(data) {
+  
+  errors_sm <- numeric(5)
+  
+  for (i in 1:5) {
+    train_data <- data[fold != i, ]
+    test_data <- data[fold == i, ]
+  
+    sm_model <- gam(price ~ s(rooms)
+             +s(total_bath)+s(rmdl_diff)
+             +s(bedrm)+s(ayb, k = 20, by = cndtn)+s(eyb)+s(saledate)+s(gba)
+             +fireplaces
+             +s(landarea)+s(latitude)+s(longitude)
+             + heat+ac+style+grade+cndtn+roof+kitchens+ward
+             +if_rmdl+buy_first
+             + ti(eyb, ayb) + ti(gba,landarea)+ti(longitude,gba)
+             + ti(longitude, ayb)
+             +ti(longitude, eyb)+ti(saledate,latitude)
+             ,data = train_data)
+    
+    pred <- predict(sm_model, newdata = test_data)
+    pred_reverse <- (pred * 0.101 + 1)^(1/0.101)
+    actual_responses <- test_data[['price']]
+    actual_responses <- (actual_responses * 0.101 + 1)^(1/0.101)
+    
+    errors_sm[i] <-  sqrt(mean((log(pred_reverse)-
+                                  log(actual_responses))^2))
+  }
+  return(errors_sm)
+}
+```
+
+```{r}
+cv_rf <- function(data) {
+  errors_rf <- numeric(5)
+  
+  for (i in 1:5) {
+    train_data <- data[fold != i, ]
+    test_data <- data[fold == i, ]
+  
+    rf_model <- ranger(price ~ . - fold,
+                data = train_data,
+                mtry = 37, splitrule = "extratrees",
+                min.node.size = 5)
+    
+    pred <- predict(rf_model, data = test_data)$predictions
+    pred_reverse <- (pred * 0.101 + 1)^(1/0.101)
+    actual_responses <- test_data[['price']]
+    actual_responses <- (actual_responses * 0.101 + 1)^(1/0.101)
+    
+    errors_rf[i] <- sqrt(mean((log(pred_reverse)-
+                                 log(actual_responses))^2))
+  }
+  return(errors_rf)
+}
+```
+
+The 5 fold cross-validation score for `smoothing`:
+
+```{r}
+set.seed(42)
+cv_result_sm <- cv_sm(dat_full)
+print(paste("5-fold cross-validatoin:" ,cv_result_sm))
+print(paste("Average: ", mean(cv_result_sm)))
+```
+
+The 5 fold cross-validation score for `random forest`:
+
+```{r}
+set.seed(42)
+cv_result_rf <- cv_rf(dat_full)
+print(paste("5-fold cross-validatoin:" ,cv_result_rf))
+print(paste("Average: ", mean(cv_result_rf)))
+```
+
+We see from 5-fold cross-validation that the predictor error of smoothing model is much lower than that of the random forest model. So from the perspective of prediction accuracy, smoothing spline model is better than random forest.
+
+## Computational complexity and runtime
+
+The running time for smoothing is `r end_sm - begin_sm`, and the running time for random forest is `r end_rf - begin_rf`. So the random forest model runs almost **7** times faster than the smoothing spline model. Random forest is more computational efficient.
+
+## Ease of use/model building
+
+It takes a longer time to build the smoothing spline model since deciding whether to add a predictor/interaction term or not is a time-consuming process (plus the running time for smoothing spline is longer). Excluding the pre-processing part, I spent about 10 hours building the smoothing spline model while for the random forest model I only spent about 5 hours. Because there aren't many tuning parameters for random forest and the running time is shorter.
+
+## Interpretation
+
+-   Random Forest : although variable importance measures can provide insights into which variables are most influential, understanding the specific nature of the relationships and interactions is challenging since we don't have direct access to them. Also, we can't visualize random forest.
+-   Smoothing Spline: each component of the model ( each predictor and interaction) has a clear, visualizable effect on the response variable, allowing us to understand how changes in predictors affect the response. Also, the effects of the predictors are modeled as smooth curves, which can be plotted and directly interpreted (see the plot below).
+-   Summary: smoothing spline is more interpretable than random forest.
+
+## Sensitivity to outliers
+
+### Outliers Identification
+
+For each fitted model, we calculate it's residuals and set the outlier threshold to be **3 times the standard deviation of the residuals**. That is, any observation with residuals 3 times the standard deviation of the residuals is labelled as outlier.
+
+For smoothing:
+
+```{r, fig.height=3}
+res1 <- residuals(fit.sm)
+outlier_cutoff1 <- 3 * sd(res1)
+outliers_indices1 <- which(abs(res1) > outlier_cutoff1)
+is_outlier1 <- abs(res1) > outlier_cutoff1  
+
+plot(fitted(fit.sm), dat_full$price,
+     xlab = "Fitted Values", ylab = "Actual Prices",
+     main = "House Prices (Smoothing Spline)",
+     col = ifelse(is_outlier1, rgb(1, 0, 0, 0.5), rgb(0, 0, 0, 0.5)),
+     pch = 16)
+
+legend("topleft", legend = "outliers", col = "red", pch = 16)
+```
+
+There are `r length(outliers_indices1)` outliers.
+
+For random forest:
+
+```{r, fig.height=3}
+pred <- predict(fit.rf, dat_full)$predictions
+res2 <- dat_full$price - pred
+outlier_cutoff2 <- 3 * sd(res2)
+outliers_indices2 <- which(abs(res2) > outlier_cutoff2)
+is_outlier2 <- abs(res2) > outlier_cutoff2  
+
+plot(pred, dat_full$price,
+     xlab = "Fitted Values", ylab = "Actual Prices",
+     main = "House Prices (random forest)",
+     col = ifelse(is_outlier2, rgb(1, 0, 0, 0.5), rgb(0, 0, 0, 0.5)),
+     pch = 16)
+
+legend("topleft", legend = "outliers", col = "red", pch = 16)
+```
+
+There are `r length(outliers_indices2)` outliers.
+
+### Sensitivity Comparison:
+
+To evaluate model's sensitivity to outliers, we lower the weight of outliers (set them to be 0.5) and re-run cross-validation for both models.
+
+```{r}
+# Smoothing
+weights1 <- rep(1, nrow(dat_full))
+weights1[outliers_indices1] <- 0.5  # Set weights of outliers to 0.5
+
+cv_sm_weight <- function(data) {
+  
+  errors_sm <- numeric(5)
+  
+  for (i in 1:5) {
+    train_indices <- which(data$fold != i)
+    train_data <- data[fold != i, ]
+    test_data <- data[fold == i, ]
+    train_weights <- weights1[train_indices]
+  
+    sm_model <- gam(price ~ s(rooms)
+             +s(total_bath)+s(rmdl_diff)
+             +s(bedrm)+s(ayb, k = 20, by = cndtn)+s(eyb)+s(saledate)+s(gba)
+             +fireplaces
+             +s(landarea)+s(latitude)+s(longitude)
+             + heat+ac+style+grade+cndtn+roof+kitchens+ward
+             +if_rmdl+buy_first
+             + ti(eyb, ayb) + ti(gba,landarea)+ti(longitude,gba)
+             + ti(longitude, ayb)
+             +ti(longitude, eyb)+ti(saledate,latitude)
+             ,data = train_data, weights = train_weights)
+    
+    pred <- predict(sm_model, newdata = test_data)
+    pred_reverse <- (pred * 0.101 + 1)^(1/0.101)
+    actual_responses <- test_data[['price']]
+    actual_responses <- (actual_responses * 0.101 + 1)^(1/0.101)
+    
+    errors_sm[i] <-  sqrt(mean((log(pred_reverse)-
+                                  log(actual_responses))^2))
+  }
+  return(errors_sm)
+}
+
+set.seed(42)
+cv_sm_weight <- cv_sm_weight(dat_full)
+```
+
+```{r}
+# Random Forest
+weights2 <- rep(1, nrow(dat_full))
+weights2[outliers_indices2] <- 0.5  # Set weights of outliers to 0.5
+
+cv_rf_weight <- function(data) {
+  errors_rf <- numeric(5)
+  
+  for (i in 1:5) {
+    train_indices <- which(data$fold != i)
+    test_indices <- which(data$fold == i)
+    
+    train_data <- data[train_indices, ]
+    test_data <- data[test_indices, ]
+    
+    train_weights <- weights2[train_indices]
+    
+    rf_model <- ranger(
+      formula = price ~ . -fold,
+      data = train_data,
+      case.weights = train_weights,  
+      mtry = 37,
+      splitrule = "extratrees",
+      min.node.size = 5,
+      num.trees = 500
+    )
+    
+    pred <- predict(rf_model, data = test_data)$predictions
+    pred_reverse <- (pred * 0.101 + 1)^(1/0.101)
+    actual_responses <- test_data[['price']]
+    actual_responses <- (actual_responses * 0.101 + 1)^(1/0.101)
+    
+    errors_rf[i] <- sqrt(mean((log(pred_reverse) -
+                                log(actual_responses))^2))
+  }
+  return(errors_rf)
+}
+
+set.seed(42)
+cv_rf_weight <- cv_rf_weight(dat_full)
+```
+
+```{r}
+print(paste("5-fold cross-validatoin:" ,cv_sm_weight))
+print(paste("Average: ", mean(cv_sm_weight)))
+```
+
+```{r}
+print(paste("5-fold cross-validatoin:" ,cv_rf_weight))
+print(paste("Average: ", mean(cv_rf_weight)))
+```
+
+-   The average cross-validation error for smoothing spline reduced from `r mean(cv_result_sm)` to `r mean(cv_sm_weight)`
+-   The average cross-validation error for random forest increased from `r mean(cv_result_rf)` to `r mean(cv_rf_weight)`. One explanation could be the random forest model is good at handling the outliers or the outliers are influential variables that helps setting the decision boundary in the model, hence excluding them might be bad for the model (less observations).
+-   Above results indicate random forest is more robust to outliers than smoothing spline.
+
+## Insights
+
+### Important interaction
+
+```{r, eval=T}
+summary(fit.sm)
+```
+
+In our final smoothing model there are 7 interaction terms, which are `eyb*ayb`, `gba*landarea`, `longitude*ayb`, `longitude*gba`, `longitude*eyb`, `saledate*latitude` and `ayb*cndtn` (specified using `by`). And all of them has p-value less than 0.05, which suggests they are significant.
+
+The following plots illustrate how the effect of one predictor on house prices varies across different values of another predictor.
+
+```{r}
+
+g1 <- ggplot(dat_full, aes(x = eyb, y = ayb, color = price, size = price)) +
+        geom_point(alpha = 0.5, shape = 15) + 
+        scale_color_gradient(low = "lightblue", high = "firebrick") +  
+        ggtitle("interaction between ayb and eyb") +
+        xlab("eyb") +
+        ylab("ayb") +
+        theme_minimal() 
+
+g2 <- ggplot(dat_full, aes(x = gba, y = landarea, color = price, size = price)) +
+  geom_point(alpha = 0.5, shape = 15) + 
+  scale_color_gradient(low = "lightblue", high = "firebrick") +  
+  ggtitle("interaction between gba and landarea") +
+  xlab("gba") +
+  ylab("landarea") +
+  theme_minimal() 
+
+
+g3 <- ggplot(dat_full, aes(x = gba, y = longitude, color = price, size = price)) +
+  geom_point(alpha = 0.5, shape = 15) + 
+  scale_color_gradient(low = "lightblue", high = "firebrick") +  
+  ggtitle("interaction between gba and longitude") +
+  xlab("gba") +
+  ylab("longitude") +
+  theme_minimal() 
+
+
+g4 <- ggplot(dat_full, aes(x = ayb, y = longitude, color = price, size = price)) +
+  geom_point(alpha = 0.5, shape = 15) + 
+  scale_color_gradient(low = "lightblue", high = "firebrick") +  
+  ggtitle("interaction between ayb and longitude") +
+  xlab("ayb") +
+  ylab("longitude") +
+  theme_minimal() 
+
+g5 <- ggplot(dat_full, aes(x = eyb, y = longitude, color = price, size = price)) +
+  geom_point(alpha = 0.5, shape = 15) + 
+  scale_color_gradient(low = "lightblue", high = "firebrick") +  
+  ggtitle("interaction between ayb and longitude") +
+  xlab("ayb") +
+  ylab("longitude") +
+  theme_minimal()
+
+g6 <- ggplot(dat_full, aes(x = saledate, y = latitude,
+                           color = price, size = price)) +
+        geom_point(alpha = 0.5, shape = 15) + 
+        scale_color_gradient(low = "lightblue", high = "firebrick") +  
+        ggtitle("interaction between saledate and latitude") +
+        xlab("saledate") +
+        ylab("latitude") +
+        theme_minimal()
+
+grid.arrange(g1, g2, ncol=2, nrow=1)
+grid.arrange(g3, g4, ncol=2, nrow=1)
+grid.arrange(g5, g6, ncol=2, nrow=1)
+
+ggplot(dat_full, aes(x = cndtn, y = ayb,
+                           color = price, size = price)) +
+        geom_point(alpha = 0.5, shape = 15) + 
+        scale_color_gradient(low = "lightblue", high = "firebrick") +  
+        ggtitle("interaction between saledate and latitude") +
+        xlab("cndtn") +
+        ylab("ayb") +
+        theme_minimal()
+```
+
+
+
+### Variable importance
+
+The variable importance is straightforward for random forest model. We use `importance = "permutation"`, which measures the decrease in mean squared error, to evaluate the variable importance in our final random forest model.
+
+```{r, echo=FALSE, eval=FALSE}
+set.seed(444)
+rf_model <- randomForest(price ~ . - fold,
+                data = dat_full,
+                mtry = 37,
+                splitrule = "extratrees",
+                nodesize = 5,
+                importance = T)
+importance <- importance(rf_model, type = 1) 
+importance_sort <- sort(importance, decreasing = TRUE)
+indices <- order(-importance)
+names <- row.names(importance)[indices]
+barplot(importance_sort, names.arg = names, las = 2, 
+        main = "Variable Importance",
+        ylab = "Importance", cex.names = 0.7)
+legend("topright", col = "red",legend = "average", lty = 1)
+avg <- mean(importance)
+abline(h = avg, col = "red")
+```
+
+```{r, fig.height=3}
+set.seed(444)
+rf_model <- ranger(price ~ . - fold,
+                data = dat_full,
+                mtry = 37, splitrule = "extratrees",
+                min.node.size = 5,
+                importance = "permutation")
+importance <-rf_model$variable.importance
+importance_sort <- sort(importance, decreasing = TRUE)
+barplot(importance_sort, names.arg = names(importance_sort), las = 2, 
+        main = "Variable Importance",
+        ylab = "Importance", cex.names = 0.7)
+legend("topright", col = c("red", "blue"),
+       legend = c("average", "less than 0.05"),
+       lty = c(1, 2))
+avg <- mean(importance)
+abline(h = avg, col = "red")
+abline(h = 0.05, col = "blue", lty = 2)
+```
+
+```{r}
+importance_sort
+```
+
+For variables that has importance greater than the average importance:
+
+-   There are `r sum(importance >= avg)` variables have importance larger than the average importance.
+-   We see the top 5 important variables are `longitude`, `quadrant`,`ward`, `inter3 (gba * saledate)`, and `saleyear`. Hence, we can conclude the most important two factor of the house price is location and the time it was sold.
+-   Other important variables include `gba`, `saledate`, `inter2 (longitude * saledate)`, `inter1(latitude * saledate)` and `grade`. Hence, we can conclude the gross building area, how the effect of the selling date on house prices varies across different locations, and the overall rating of the house itself are helpful in predicting house price.
+-   `longitude` is significantly more important than other variables.
+
+For variables that has importance less than the average importance:
+
+-   There are `r sum(importance < avg)` variables have importance less than the average importance and 16 variables that has importance less than 0.05.
+-   The least important 3 variables are `kitchens`, `intwall`, and `extwall`, which suggests the number of kitchens, the material of interior wall and exterior wall are not help in predicting house price.
+
+### Exploratory Data Analysis (EDA)
+
+Using this dataset, there are some meaningful questions we can answer.
+
+1.  What factors are most predictive of house prices?
+
+**Answer:**
+
+-   since longitude, quadrant and ward are highly important variable in our prediction model, location is the most important factor in predicting house prices. House located at city center have a higher prices than house located at rural areas.
+-   some other important factors include the time the house was sold and the gross area of the house, which align with our intuition. The bigger than area of the house, the higher the price and the earlier the time it was sold, the less the price.
+
+2.  How have house prices changed over time?
+
+**Answer:** the prices increase over time.
+
+3.  How do renovations and remodeling affect house prices?
+
+**Answer:** the variable importance from random forest suggest remodeling doesn't have a obvious impact on house price. Hence, from a seller's point of view, renovation is optional before selling the house.
+
+4.  How specific features like type of heating, air conditioning, and the presence of a fireplace influence house prices?
+
+**Answer:** 
+
+  - The most important features are number of bathrooms, number of bedrooms and number of fireplaces. The higher number the number of bathrooms, bedrooms, and fireplaces, the higher the price
+  - The least important features are number of kitchens, material of interior and exterior wall, and type of heat. In general, buyers don't care about those feature that much.
+
+
+\newpage
+
+# Conclusions
+In this project, we built two models using random forest and smoothing spline to predict the house price. The findings can be divided into two aspects:
+
+From the perspective of modelling:
+
+- Random forest is more time-efficient/computational efficient and more robust to outliers
+- Smoothing spline has higher interpretability and higher prediction accuracy.
+- Suggestion: if one has enough time and need to do detailed data analysis, it's advisable to use the smoothing spline approach as a decent smoothing spline model will give you more information and higher prediction accuracy. However, if it's a urgent task, random forest will serve the purpose of making good prediction with less effort in tuning.
+
+
+
+From the perspective of house price prediction:
+
+- Location: the location of the house (captured by variables like longitude, ward, and quadrant) was found to be a critical predictor of house prices.
+- Time influence: the selling time was also crucial, as the price increases over time.
+- Property characteristics: physical attributes of properties, including gross building area, conditions, and number of bathrooms played substantial roles in influencing house prices.
