@@ -1,5 +1,5 @@
 # House-Price-Prediction
-* Predicting house price using random forest model and smoothing spline model.
+* Predicting house price using **random forest model** and **smoothing spline model**.
 * Both models are built using `dtrain` and tested using `dtest`
 
 # Results:
